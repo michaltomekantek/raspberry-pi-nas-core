@@ -5,12 +5,14 @@ import subprocess
 import re
 
 app = Flask(__name__)
-api = Api(app, version='1.1', title='Raspberry Pi Advanced Info API',
-          description='Monitorowanie systemu i temperatury dysków SMART')
+# Konfiguracja Swaggera
+api = Api(app, version='1.2', title='Raspberry Pi NAS Monitor',
+          description='Monitorowanie temperatury CPU/Dysków oraz zajętości miejsca')
 
-ns = api.namespace('system', description='Operacje systemowe')
+ns = api.namespace('system', description='Statystyki systemowe')
 
 def get_cpu_temp():
+    """Pobiera temperaturę procesora malinki."""
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
             return f"{int(f.read()) / 1000.0:.1f}°C"
@@ -18,59 +20,74 @@ def get_cpu_temp():
         return "N/A"
 
 def get_disk_temp(device):
-    """Pobiera temperaturę dysku za pomocą smartctl."""
+    """Wyciąga realną temperaturę z kolumny RAW_VALUE narzędzia smartctl."""
     try:
-        # Uruchamiamy smartctl -n standby (żeby nie budzić uśpionych dysków niepotrzebnie)
-        result = subprocess.check_output(['sudo', 'smartctl', '-A', device], stderr=subprocess.STDOUT).decode()
-        # Szukamy linii z "Temperature_Celsius" lub "Airflow_Temperature_Cel"
-        match = re.search(r'(Temperature_Celsius|Airflow_Temperature_Cel).*\s+(\d+)\s+', result)
-        if match:
-            return f"{match.group(2)}°C"
+        # Wywołujemy smartctl dla konkretnego urządzenia
+        result = subprocess.check_output(['sudo', 'smartctl', '-A', device],
+                                         stderr=subprocess.STDOUT,
+                                         universal_newlines=True)
+
+        # Szukamy linii z Temperature_Celsius lub Airflow_Temperature_Cel
+        # Szukamy ostatniej liczby w linii (RAW_VALUE)
+        for line in result.splitlines():
+            if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
+                parts = line.split()
+                if len(parts) >= 10:
+                    # RAW_VALUE to zazwyczaj 10. kolumna w wyjściu smartctl -A
+                    temp_raw = parts[9]
+                    # Czasami raw value zawiera dodatkowe info (np. 43 (Min/Max 41/44)), bierzemy tylko cyfry
+                    temp_only = re.search(r'^(\.?\d+)', temp_raw)
+                    if temp_only:
+                        return f"{temp_only.group(1)}°C"
+
         return "Brak danych SMART"
     except Exception:
         return "Nieobsługiwany / Brak uprawnień"
 
 @ns.route('/stats')
 class RaspberryStats(Resource):
+    @ns.doc('get_all_stats')
     def get(self):
+        """Zwraca dane o CPU i wszystkich podłączonych dyskach."""
         disk_info = []
         partitions = psutil.disk_partitions()
 
-        # Słownik, aby nie sprawdzać temperatury kilka razy dla różnych partycji tego samego dysku
-        seen_devices = set()
+        # Zbiór, żeby nie sprawdzać tego samego fizycznego dysku wielokrotnie (partycje sda1, sda2 itp.)
+        seen_physical_devices = {}
 
         for partition in partitions:
-            if 'loop' in partition.device or not partition.mountpoint:
+            # Ignorujemy wirtualne systemy plików
+            if 'loop' in partition.device or not partition.mountpoint or '/snap/' in partition.mountpoint:
                 continue
 
-            # Wyciągamy nazwę urządzenia (np. /dev/sda1 -> /dev/sda)
+            # Znajdujemy nazwę bazową dysku (np. /dev/sdb z /dev/sdb1)
             device_base = re.sub(r'\d+$', '', partition.device)
+
+            # Pobieramy temperaturę tylko raz dla całego fizycznego nośnika
+            if device_base not in seen_physical_devices:
+                if device_base.startswith('/dev/sd') or device_base.startswith('/dev/nvme'):
+                    seen_physical_devices[device_base] = get_disk_temp(device_base)
+                else:
+                    seen_physical_devices[device_base] = "N/A (SD Card/Internal)"
 
             try:
                 usage = psutil.disk_usage(partition.mountpoint)
-                info = {
-                    "device": partition.device,
+                disk_info.append({
+                    "partition": partition.device,
                     "mountpoint": partition.mountpoint,
                     "total_gb": round(usage.total / (1024**3), 2),
+                    "used_gb": round(usage.used / (1024**3), 2),
                     "percent_used": f"{usage.percent}%",
-                    "temperature": "N/A"
-                }
-
-                # Pobieramy temperaturę tylko raz dla fizycznego urządzenia
-                if device_base not in seen_devices and device_base.startswith('/dev/sd'):
-                    info["temperature"] = get_disk_temp(device_base)
-                    seen_devices.add(device_base)
-                elif device_base in seen_devices:
-                    info["temperature"] = "Patrz wyżej (to samo urządzenie)"
-
-                disk_info.append(info)
+                    "device_temp": seen_physical_devices[device_base]
+                })
             except PermissionError:
                 continue
 
         return {
             "cpu_temperature": get_cpu_temp(),
-            "storage_devices": disk_info
+            "disks": disk_info
         }
 
 if __name__ == '__main__':
+    # Uruchomienie: sudo .venv/bin/python main.py
     app.run(host='0.0.0.0', port=5000, debug=True)
