@@ -6,13 +6,12 @@ import re
 from datetime import datetime
 
 app = Flask(__name__)
-api = Api(app, version='1.3', title='Raspberry Pi NAS Monitor',
-          description='Statystyki systemowe: CPU, RAM, Uptime i Dyski (SMART)')
+api = Api(app, version='1.4', title='Raspberry Pi NAS Monitor',
+          description='Pełny monitoring systemu i dysków (z obsługą mostków USB SAT)')
 
 ns = api.namespace('system', description='Statystyki systemowe')
 
 def get_uptime():
-    """Zwraca czas działania systemu w czytelnym formacie."""
     boot_time = datetime.fromtimestamp(psutil.boot_time())
     now = datetime.now()
     diff = now - boot_time
@@ -28,29 +27,41 @@ def get_cpu_temp():
     except:
         return "N/A"
 
+def parse_smartctl_output(output):
+    """Pomocnicza funkcja do wyciągania temperatury z tekstu smartctl."""
+    for line in output.splitlines():
+        if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
+            parts = line.split()
+            if len(parts) >= 10:
+                temp_raw = parts[9]
+                temp_only = re.search(r'^(\.?\d+)', temp_raw)
+                if temp_only:
+                    return f"{temp_only.group(1)}°C"
+    return None
+
 def get_disk_temp(device):
+    """Pobiera temperaturę, próbując różnych trybów dla adapterów USB."""
     try:
-        result = subprocess.check_output(['sudo', 'smartctl', '-A', device],
-                                         stderr=subprocess.STDOUT,
-                                         universal_newlines=True)
-        for line in result.splitlines():
-            if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
-                parts = line.split()
-                if len(parts) >= 10:
-                    temp_raw = parts[9]
-                    temp_only = re.search(r'^(\.?\d+)', temp_raw)
-                    if temp_only:
-                        return f"{temp_only.group(1)}°C"
-        return "Brak danych"
+        # Próba 1: Standardowa
+        res1 = subprocess.check_output(['sudo', 'smartctl', '-A', device],
+                                       stderr=subprocess.STDOUT, universal_newlines=True)
+        temp = parse_smartctl_output(res1)
+        if temp: return temp
+
+        # Próba 2: Wymuszenie trybu SAT (dla Twojego SSD /dev/sda)
+        res2 = subprocess.check_output(['sudo', 'smartctl', '-d', 'sat', '-A', device],
+                                       stderr=subprocess.STDOUT, universal_newlines=True)
+        temp = parse_smartctl_output(res2)
+        if temp: return temp
+
+        return "Brak sensora"
     except Exception:
-        return "Nieobsługiwany adapter"
+        return "Błąd odczytu"
 
 @ns.route('/stats')
 class RaspberryStats(Resource):
     def get(self):
-        # Statystyki RAM
         ram = psutil.virtual_memory()
-
         disk_info = []
         partitions = psutil.disk_partitions()
         seen_physical_devices = {}
@@ -81,17 +92,14 @@ class RaspberryStats(Resource):
                 continue
 
         return {
-            "system_info": {
+            "system": {
                 "uptime": get_uptime(),
                 "cpu_temp": get_cpu_temp(),
-                "ram_usage": {
-                    "total_gb": round(ram.total / (1024**3), 2),
-                    "used_gb": round(ram.used / (1024**3), 2),
-                    "percent": f"{ram.percent}%"
-                }
+                "ram_percent": f"{ram.percent}%"
             },
             "disks": disk_info
         }
 
 if __name__ == '__main__':
+    # Uruchomienie: sudo .venv/bin/python main.py
     app.run(host='0.0.0.0', port=5000, debug=True)
