@@ -1,19 +1,60 @@
-import sys
+from flask import Flask
+from flask_restx import Api, Resource
+import psutil
 import os
 
-def main():
-    print("Hello, Raspberry Pi!")
-    print("-" * 20)
+app = Flask(__name__)
+# Konfiguracja Swaggera
+api = Api(app, version='1.0', title='Raspberry Pi Info API',
+          description='Endpointy do monitorowania stanu malinki')
 
-    # Wyświetlenie wersji Pythona
-    print(f"Python version: {sys.version.split()[0]}")
+ns = api.namespace('system', description='Operacje systemowe')
 
-    # Wyświetlenie nazwy użytkownika i ścieżki
-    user = os.getenv('USER') or os.getenv('USERNAME')
-    print(f"Current user: {user}")
+def get_temp():
+    """Pobiera temperaturę procesora na Raspberry Pi."""
+    try:
+        # Standardowa ścieżka w Raspberry Pi OS
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+            temp = int(f.read()) / 1000.0
+            return f"{temp:.1f}°C"
+    except:
+        return "N/A (Czy to na pewno Raspberry Pi?)"
 
-    print("-" * 20)
-    print("Gotowy do pracy nad NAS-em!")
+@ns.route('/stats')
+class RaspberryStats(Resource):
+    @ns.doc('get_stats')
+    def get(self):
+        """Zwraca temperaturę i informacje o dyskach"""
 
-if __name__ == "__main__":
-    main()
+        # Informacje o dyskach i zajętym miejscu
+        disk_info = []
+        partitions = psutil.disk_partitions()
+
+        for partition in partitions:
+            # Pomijamy pętle i partycje systemowe o zerowej pojemności
+            if 'loop' in partition.device or not partition.mountpoint:
+                continue
+
+            try:
+                usage = psutil.disk_usage(partition.mountpoint)
+                disk_info.append({
+                    "device": partition.device,
+                    "mountpoint": partition.mountpoint,
+                    "total_gb": round(usage.total / (1024**3), 2),
+                    "used_gb": round(usage.used / (1024**3), 2),
+                    "free_gb": round(usage.free / (1024**3), 2),
+                    "percent_used": f"{usage.percent}%"
+                })
+            except PermissionError:
+                continue
+
+        return {
+            "raspberry_pi_stats": {
+                "cpu_temperature": get_temp(),
+                "storage": disk_info
+            }
+        }
+
+if __name__ == '__main__':
+    # Uruchamiamy na porcie 5000, dostępnym w sieci lokalnej (0.0.0.0)
+    app.run(host='0.0.0.0', port=5000, debug=True)
