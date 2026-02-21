@@ -11,14 +11,13 @@ from log_parser import get_backup_files, parse_backup_log
 
 app = Flask(__name__)
 CORS(app)
-api = Api(app, version='2.0', title='Raspberry Pi Ultimate API',
+api = Api(app, version='2.1', title='Raspberry Pi Ultimate API',
           description='Monitoring systemu, dysków i logów backupu')
 
-# Podział na sekcje (Namespaces) w Swaggerze
 sys_ns = api.namespace('system', description='Statystyki sprzętowe')
 logs_ns = api.namespace('backups', description='Analiza logów backupu')
 
-# --- FUNKCJE POMOCNICZE (Hardware) ---
+# --- HARDWARE FUNCTIONS ---
 
 def get_cpu_temp():
     try:
@@ -27,6 +26,7 @@ def get_cpu_temp():
     except: return "N/A"
 
 def get_disk_temp(device):
+    # Próba odczytu dla standardowych dysków i tych za mostkiem USB (sat)
     configs = [['sudo', 'smartctl', '-A', device], ['sudo', 'smartctl', '-d', 'sat', '-A', device]]
     for cmd in configs:
         try:
@@ -34,16 +34,16 @@ def get_disk_temp(device):
             for line in result.stdout.splitlines():
                 if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
                     val = line.split()[9]
-                    return f"{re.search(r'^(\d+)', val).group(1)}°C"
+                    temp_match = re.search(r'^(\d+)', val)
+                    return f"{temp_match.group(1)}°C" if temp_match else "N/A"
         except: continue
     return "N/A"
 
-# --- ENDPOINTY: SYSTEM ---
+# --- ENDPOINTS: SYSTEM ---
 
 @sys_ns.route('/stats')
 class SystemStats(Resource):
     def get(self):
-        """Zwraca temperaturę CPU, RAM i pogrupowane dyski."""
         ram = psutil.virtual_memory()
         partitions = psutil.disk_partitions()
         grouped_disks = {}
@@ -63,25 +63,31 @@ class SystemStats(Resource):
                     "free_gb": round(usage.free / (1024**3), 2)
                 })
             except: continue
-
         return {
             "cpu_temp": get_cpu_temp(),
             "ram_percent": f"{ram.percent}%",
             "disks": list(grouped_disks.values())
         }
 
-# --- ENDPOINTY: BACKUPS ---
+# --- ENDPOINTS: BACKUPS ---
 
 @logs_ns.route('/')
 class BackupList(Resource):
     def get(self):
-        """Lista wszystkich dostępnych raportów JSON (backupy)."""
-        files = get_backup_files() # To już zwraca pliki .json dzięki nowemu parserowi
+        """Lista wszystkich raportów JSON."""
+        files = get_backup_files()
         result = []
         for f in files:
-            # Szybki podgląd statusu bezpośrednio z pliku JSON
             data = parse_backup_log(f)
-            if data and "error" not in data:
+            # Nawet jeśli jest błąd (np. brak uprawnień), pokaż plik na liście
+            if data and "error" in data:
+                result.append({
+                    "filename": f,
+                    "status": "Error/NoAccess",
+                    "date": "N/A",
+                    "error_detail": data["error"]
+                })
+            else:
                 result.append({
                     "filename": f,
                     "status": data.get("status", "Unknown"),
@@ -93,14 +99,15 @@ class BackupList(Resource):
 class BackupDetail(Resource):
     def get(self, filename):
         """Pełne dane z konkretnego raportu JSON."""
-        # Jeśli użytkownik nie podał rozszerzenia w URL, możemy je dodać
         if not filename.endswith('.json'):
             filename += '.json'
 
         data = parse_backup_log(filename)
         if not data or "error" in data:
-            return {"error": "Plik nie istnieje lub jest uszkodzony"}, 404
+            # Zwracamy szczegóły błędu zamiast ogólnego 404
+            return {"error": data.get("error", "Plik nie istnieje") if data else "Plik nie istnieje"}, 404
         return data
 
 if __name__ == '__main__':
+    # Ważne: debug=True ułatwia szukanie błędów, ale restartuje apkę przy zmianach w kodzie
     app.run(host='0.0.0.0', port=5000, debug=True)
