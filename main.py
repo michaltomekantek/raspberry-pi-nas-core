@@ -75,21 +75,31 @@ class SystemStats(Resource):
 @logs_ns.route('/')
 class BackupList(Resource):
     def get(self):
-        """Lista wszystkich dostępnych plików logów."""
-        files = get_backup_files()
+        """Lista wszystkich dostępnych raportów JSON (backupy)."""
+        files = get_backup_files() # To już zwraca pliki .json dzięki nowemu parserowi
         result = []
         for f in files:
-            # Szybki podgląd statusu
+            # Szybki podgląd statusu bezpośrednio z pliku JSON
             data = parse_backup_log(f)
-            result.append({"filename": f, "status": data["status"], "date": data["timestamp"]})
+            if data and "error" not in data:
+                result.append({
+                    "filename": f,
+                    "status": data.get("status", "Unknown"),
+                    "date": data.get("timestamp", "N/A")
+                })
         return result
 
 @logs_ns.route('/<string:filename>')
 class BackupDetail(Resource):
     def get(self, filename):
-        """Pełne szczegóły wyciągnięte z jednego logu."""
+        """Pełne dane z konkretnego raportu JSON."""
+        # Jeśli użytkownik nie podał rozszerzenia w URL, możemy je dodać
+        if not filename.endswith('.json'):
+            filename += '.json'
+
         data = parse_backup_log(filename)
-        if not data: return {"error": "Not found"}, 404
+        if not data or "error" in data:
+            return {"error": "Plik nie istnieje lub jest uszkodzony"}, 404
         return data
 
 if __name__ == '__main__':
