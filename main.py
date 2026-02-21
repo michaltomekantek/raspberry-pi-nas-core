@@ -11,9 +11,6 @@ from datetime import datetime
 from log_parser import get_backup_files, parse_backup_log
 from script_manager import run_script
 
-# Dodaj nowy Namespace
-actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
-
 app = Flask(__name__)
 CORS(app)
 api = Api(app, version='2.2', title='Raspberry Pi NAS Ultimate API',
@@ -21,6 +18,7 @@ api = Api(app, version='2.2', title='Raspberry Pi NAS Ultimate API',
 
 sys_ns = api.namespace('system', description='Statystyki sprzętowe')
 logs_ns = api.namespace('backups', description='Analiza logów backupu')
+actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
 
 # --- FUNKCJE POMOCNICZE ---
 
