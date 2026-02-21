@@ -6,103 +6,91 @@ import subprocess
 import re
 from datetime import datetime
 
+# Importujemy nasz parser z osobnego pliku
+from log_parser import get_backup_files, parse_backup_log
+
 app = Flask(__name__)
 CORS(app)
+api = Api(app, version='2.0', title='Raspberry Pi Ultimate API',
+          description='Monitoring systemu, dysków i logów backupu')
 
-api = Api(app, version='1.7', title='Raspberry Pi NAS API',
-          description='Grupowanie partycji per fizyczny dysk')
+# Podział na sekcje (Namespaces) w Swaggerze
+sys_ns = api.namespace('system', description='Statystyki sprzętowe')
+logs_ns = api.namespace('backups', description='Analiza logów backupu')
 
-ns = api.namespace('system', description='Statystyki systemowe')
-
-def get_uptime():
-    boot_time = datetime.fromtimestamp(psutil.boot_time())
-    diff = datetime.now() - boot_time
-    days = diff.days
-    hours, remainder = divmod(diff.seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-    return f"{days}d {hours}h {minutes}m"
+# --- FUNKCJE POMOCNICZE (Hardware) ---
 
 def get_cpu_temp():
     try:
         with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
             return f"{int(f.read()) / 1000.0:.1f}°C"
-    except:
-        return "N/A"
-
-def parse_smartctl_output(output):
-    for line in output.splitlines():
-        if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
-            parts = line.split()
-            if len(parts) >= 10:
-                temp_raw = parts[9]
-                temp_match = re.search(r'^(\d+)', temp_raw)
-                if temp_match:
-                    return f"{temp_match.group(1)}°C"
-    return None
+    except: return "N/A"
 
 def get_disk_temp(device):
-    configs = [
-        ['sudo', 'smartctl', '-A', device],
-        ['sudo', 'smartctl', '-d', 'sat', '-A', device]
-    ]
+    configs = [['sudo', 'smartctl', '-A', device], ['sudo', 'smartctl', '-d', 'sat', '-A', device]]
     for cmd in configs:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            temp = parse_smartctl_output(result.stdout)
-            if temp: return temp
+            for line in result.stdout.splitlines():
+                if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
+                    val = line.split()[9]
+                    return f"{re.search(r'^(\d+)', val).group(1)}°C"
         except: continue
     return "N/A"
 
-@ns.route('/stats')
-class RaspberryStats(Resource):
+# --- ENDPOINTY: SYSTEM ---
+
+@sys_ns.route('/stats')
+class SystemStats(Resource):
     def get(self):
+        """Zwraca temperaturę CPU, RAM i pogrupowane dyski."""
         ram = psutil.virtual_memory()
         partitions = psutil.disk_partitions()
-
-        # Słownik na pogrupowane dane: { '/dev/sda': { 'temp': '36°C', 'partitions': [...] } }
         grouped_disks = {}
 
         for part in partitions:
-            # Filtry systemowe
-            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']):
+            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
-            if not part.device.startswith('/dev/sd') and not part.device.startswith('/dev/nvme'):
-                continue
-
-            # Wyciągamy bazę (np. /dev/sda) usuwając cyfry z końca
             dev_base = re.sub(r'\d+$', '', part.device)
-
-            # Jeśli pierwszy raz widzimy ten dysk fizyczny, zainicjuj go
             if dev_base not in grouped_disks:
-                grouped_disks[dev_base] = {
-                    "physical_device": dev_base,
-                    "temperature": get_disk_temp(dev_base),
-                    "partitions": []
-                }
+                grouped_disks[dev_base] = {"device": dev_base, "temp": get_disk_temp(dev_base), "partitions": []}
 
             try:
                 usage = psutil.disk_usage(part.mountpoint)
                 grouped_disks[dev_base]["partitions"].append({
-                    "partition_name": part.device,
-                    "mountpoint": part.mountpoint,
-                    "total_gb": round(usage.total / (1024**3), 2),
-                    "used_gb": round(usage.used / (1024**3), 2),
-                    "percent_used": f"{usage.percent}%"
+                    "mount": part.mountpoint,
+                    "used_percent": f"{usage.percent}%",
+                    "free_gb": round(usage.free / (1024**3), 2)
                 })
-            except:
-                continue
-
-        # Zamieniamy słownik na listę dla ładniejszego JSONa
-        disks_list = list(grouped_disks.values())
+            except: continue
 
         return {
-            "system": {
-                "uptime": get_uptime(),
-                "cpu_temp": get_cpu_temp(),
-                "ram_percent": f"{ram.percent}%"
-            },
-            "physical_disks": disks_list
+            "cpu_temp": get_cpu_temp(),
+            "ram_percent": f"{ram.percent}%",
+            "disks": list(grouped_disks.values())
         }
+
+# --- ENDPOINTY: BACKUPS ---
+
+@logs_ns.route('/')
+class BackupList(Resource):
+    def get(self):
+        """Lista wszystkich dostępnych plików logów."""
+        files = get_backup_files()
+        result = []
+        for f in files:
+            # Szybki podgląd statusu
+            data = parse_backup_log(f)
+            result.append({"filename": f, "status": data["status"], "date": data["timestamp"]})
+        return result
+
+@logs_ns.route('/<string:filename>')
+class BackupDetail(Resource):
+    def get(self, filename):
+        """Pełne szczegóły wyciągnięte z jednego logu."""
+        data = parse_backup_log(filename)
+        if not data: return {"error": "Not found"}, 404
+        return data
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
