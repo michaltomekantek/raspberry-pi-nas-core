@@ -9,6 +9,10 @@ from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
 from log_parser import get_backup_files, parse_backup_log
+from script_manager import run_script
+
+# Dodaj nowy Namespace
+actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
 
 app = Flask(__name__)
 CORS(app)
@@ -122,6 +126,18 @@ class BackupDetail(Resource):
         if not data or "error" in data:
             return {"error": data.get("error", "Plik nie istnieje") if data else "Plik nie istnieje"}, 404
         return data
+
+@actions_ns.route('/run-daily-backup')
+class RunDailyBackup(Resource):
+    def post(self):
+        """Uruchamia codzienny backup (backup.sh)"""
+        return run_script("backup.sh")
+
+@actions_ns.route('/run-cold-storage')
+class RunColdStorage(Resource):
+    def post(self):
+        """Uruchamia backup na zimny dysk (cold_storage.sh)"""
+        return run_script("cold_storage.sh")
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
