@@ -6,8 +6,8 @@ import re
 from datetime import datetime
 
 app = Flask(__name__)
-api = Api(app, version='1.4', title='Raspberry Pi NAS Monitor',
-          description='Pełny monitoring systemu i dysków (z obsługą mostków USB SAT)')
+api = Api(app, version='1.5', title='Raspberry Pi NAS Monitor',
+          description='Monitoring systemu i dysków (Naprawiona obsługa błędów SMART)')
 
 ns = api.namespace('system', description='Statystyki systemowe')
 
@@ -28,35 +28,36 @@ def get_cpu_temp():
         return "N/A"
 
 def parse_smartctl_output(output):
-    """Pomocnicza funkcja do wyciągania temperatury z tekstu smartctl."""
+    """Wyciąga temperaturę z tekstu - szuka ostatniej liczby w odpowiedniej linii."""
     for line in output.splitlines():
         if "Temperature_Celsius" in line or "Airflow_Temperature_Cel" in line:
             parts = line.split()
             if len(parts) >= 10:
                 temp_raw = parts[9]
-                temp_only = re.search(r'^(\.?\d+)', temp_raw)
+                temp_only = re.search(r'^(\d+)', temp_raw)
                 if temp_only:
                     return f"{temp_only.group(1)}°C"
     return None
 
 def get_disk_temp(device):
-    """Pobiera temperaturę, próbując różnych trybów dla adapterów USB."""
-    try:
-        # Próba 1: Standardowa
-        res1 = subprocess.check_output(['sudo', 'smartctl', '-A', device],
-                                       stderr=subprocess.STDOUT, universal_newlines=True)
-        temp = parse_smartctl_output(res1)
-        if temp: return temp
+    """Pobiera temperaturę, ignorując błędy wyjścia smartctl."""
+    # Lista komend do przetestowania dla każdego dysku
+    commands = [
+        ['sudo', 'smartctl', '-A', device],
+        ['sudo', 'smartctl', '-d', 'sat', '-A', device]
+    ]
 
-        # Próba 2: Wymuszenie trybu SAT (dla Twojego SSD /dev/sda)
-        res2 = subprocess.check_output(['sudo', 'smartctl', '-d', 'sat', '-A', device],
-                                       stderr=subprocess.STDOUT, universal_newlines=True)
-        temp = parse_smartctl_output(res2)
-        if temp: return temp
+    for cmd in commands:
+        try:
+            # capture_output=True przechwytuje wynik, check=False ignoruje kody błędów
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            temp = parse_smartctl_output(result.stdout)
+            if temp:
+                return temp
+        except Exception:
+            continue
 
-        return "Brak sensora"
-    except Exception:
-        return "Błąd odczytu"
+    return "Nieobsługiwany"
 
 @ns.route('/stats')
 class RaspberryStats(Resource):
@@ -70,6 +71,7 @@ class RaspberryStats(Resource):
             if 'loop' in partition.device or not partition.mountpoint or '/snap/' in partition.mountpoint:
                 continue
 
+            # Normalizacja nazwy urządzenia (np. /dev/sda1 -> /dev/sda)
             device_base = re.sub(r'\d+$', '', partition.device)
 
             if device_base not in seen_physical_devices:
@@ -101,5 +103,4 @@ class RaspberryStats(Resource):
         }
 
 if __name__ == '__main__':
-    # Uruchomienie: sudo .venv/bin/python main.py
     app.run(host='0.0.0.0', port=5000, debug=True)
