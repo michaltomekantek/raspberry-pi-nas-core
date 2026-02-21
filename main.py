@@ -4,6 +4,7 @@ from flask_cors import CORS
 import psutil
 import subprocess
 import re
+import os
 from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
@@ -11,13 +12,28 @@ from log_parser import get_backup_files, parse_backup_log
 
 app = Flask(__name__)
 CORS(app)
-api = Api(app, version='2.1', title='Raspberry Pi Ultimate API',
+api = Api(app, version='2.2', title='Raspberry Pi NAS Ultimate API',
           description='Monitoring systemu, dysków i logów backupu')
 
 sys_ns = api.namespace('system', description='Statystyki sprzętowe')
 logs_ns = api.namespace('backups', description='Analiza logów backupu')
 
-# --- HARDWARE FUNCTIONS ---
+# --- FUNKCJE POMOCNICZE ---
+
+def get_uptime():
+    """Zwraca czytelny czas pracy systemu."""
+    with open('/proc/uptime', 'r') as f:
+        uptime_seconds = float(f.readline().split()[0])
+
+    days = int(uptime_seconds // (24 * 3600))
+    hours = int((uptime_seconds % (24 * 3600)) // 3600)
+    minutes = int((uptime_seconds % 3600) // 60)
+
+    parts = []
+    if days > 0: parts.append(f"{days}d")
+    if hours > 0: parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
 
 def get_cpu_temp():
     try:
@@ -26,7 +42,6 @@ def get_cpu_temp():
     except: return "N/A"
 
 def get_disk_temp(device):
-    # Próba odczytu dla standardowych dysków i tych za mostkiem USB (sat)
     configs = [['sudo', 'smartctl', '-A', device], ['sudo', 'smartctl', '-d', 'sat', '-A', device]]
     for cmd in configs:
         try:
@@ -39,15 +54,18 @@ def get_disk_temp(device):
         except: continue
     return "N/A"
 
-# --- ENDPOINTS: SYSTEM ---
+# --- ENDPOINTY: SYSTEM ---
 
 @sys_ns.route('/stats')
 class SystemStats(Resource):
     def get(self):
+        """Pełne statystyki: CPU, RAM, Uptime i Dyski."""
         ram = psutil.virtual_memory()
+        load1, load5, load15 = os.getloadavg()
         partitions = psutil.disk_partitions()
         grouped_disks = {}
 
+        # Grupowanie dysków
         for part in partitions:
             if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
@@ -60,54 +78,50 @@ class SystemStats(Resource):
                 grouped_disks[dev_base]["partitions"].append({
                     "mount": part.mountpoint,
                     "used_percent": f"{usage.percent}%",
-                    "free_gb": round(usage.free / (1024**3), 2)
+                    "free_gb": round(usage.free / (1024**3), 2),
+                    "total_gb": round(usage.total / (1024**3), 2)
                 })
             except: continue
+
         return {
-            "cpu_temp": get_cpu_temp(),
-            "ram_percent": f"{ram.percent}%",
+            "system_info": {
+                "uptime": get_uptime(),
+                "cpu_temp": get_cpu_temp(),
+                "cpu_load_1min": round(load1, 2),
+                "active_processes": len(psutil.pids())
+            },
+            "ram": {
+                "total_gb": round(ram.total / (1024**3), 2),
+                "used_gb": round(ram.used / (1024**3), 2),
+                "free_gb": round(ram.available / (1024**3), 2),
+                "percent": f"{ram.percent}%"
+            },
             "disks": list(grouped_disks.values())
         }
 
-# --- ENDPOINTS: BACKUPS ---
+# --- ENDPOINTY: BACKUPS ---
 
 @logs_ns.route('/')
 class BackupList(Resource):
     def get(self):
-        """Lista wszystkich raportów JSON."""
         files = get_backup_files()
         result = []
         for f in files:
             data = parse_backup_log(f)
-            # Nawet jeśli jest błąd (np. brak uprawnień), pokaż plik na liście
             if data and "error" in data:
-                result.append({
-                    "filename": f,
-                    "status": "Error/NoAccess",
-                    "date": "N/A",
-                    "error_detail": data["error"]
-                })
+                result.append({"filename": f, "status": "Error/NoAccess", "date": "N/A", "error_detail": data["error"]})
             else:
-                result.append({
-                    "filename": f,
-                    "status": data.get("status", "Unknown"),
-                    "date": data.get("timestamp", "N/A")
-                })
+                result.append({"filename": f, "status": data.get("status", "Unknown"), "date": data.get("timestamp", "N/A")})
         return result
 
 @logs_ns.route('/<string:filename>')
 class BackupDetail(Resource):
     def get(self, filename):
-        """Pełne dane z konkretnego raportu JSON."""
-        if not filename.endswith('.json'):
-            filename += '.json'
-
+        if not filename.endswith('.json'): filename += '.json'
         data = parse_backup_log(filename)
         if not data or "error" in data:
-            # Zwracamy szczegóły błędu zamiast ogólnego 404
             return {"error": data.get("error", "Plik nie istnieje") if data else "Plik nie istnieje"}, 404
         return data
 
 if __name__ == '__main__':
-    # Ważne: debug=True ułatwia szukanie błędów, ale restartuje apkę przy zmianach w kodzie
     app.run(host='0.0.0.0', port=5000, debug=True)
