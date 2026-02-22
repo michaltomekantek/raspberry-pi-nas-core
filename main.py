@@ -28,11 +28,7 @@ power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzen
 # --- FUNKCJE POMOCNICZE ---
 
 # Cache na dane z komendy du
-storage_details_cache = {
-    "last_update": 0,
-    "used_gb": 0,
-    "folders": {}
-}
+storage_cache = {}
 
 def get_uptime():
     """Zwraca czytelny czas pracy systemu."""
@@ -72,40 +68,49 @@ def get_disk_temp(device):
 
 CACHE_TIMEOUT = 600  # 10 minut
 
-def get_detailed_storage_info(path):
-    global storage_details_cache
+def get_mount_details(path):
+    """Pobiera wagę folderów i realny rozmiar dla dowolnej ścieżki."""
     now = time.time()
 
-    if now - storage_details_cache["last_update"] > CACHE_TIMEOUT:
-        try:
-            # 1. Pobieramy wagę głównych folderów (max-depth=1)
-            # du -sh * zwraca czytelne wartości typu 238G
-            result = subprocess.run(
-                f"sudo du -sh {path}/*",
-                shell=True, capture_output=True, text=True, timeout=10
-            )
+    # Jeśli mamy świeży cache dla tej ścieżki, zwracamy go
+    if path in storage_cache and (now - storage_cache[path]["last_update"] < CACHE_TIMEOUT):
+        return storage_cache[path]
 
-            folders = {}
-            total_bytes = 0
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    size_str = parts[0]
-                    folder_path = parts[1]
-                    folder_name = os.path.basename(folder_path)
-                    folders[folder_name] = size_str
+    try:
+        # 1. Pobieramy wagę folderów (max-depth=1)
+        # Używamy sudo, aby mieć dostęp do wszystkich podfolderów
+        result = subprocess.run(
+            f"sudo du -sh {path}/*",
+            shell=True, capture_output=True, text=True, timeout=15
+        )
 
-            # 2. Pobieramy dokładną sumę bajtów dla całego dysku do procentów
-            total_res = subprocess.run(['du', '-sb', path], capture_output=True, text=True, timeout=5)
-            total_bytes = int(total_res.stdout.split()[0])
+        folders = {}
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 2:
+                size_str = parts[0]
+                folder_name = os.path.basename(parts[1])
+                folders[folder_name] = size_str
 
-            storage_details_cache["folders"] = folders
-            storage_details_cache["used_gb"] = total_bytes / (1024**3)
-            storage_details_cache["last_update"] = now
-        except Exception as e:
-            print(f"Błąd du: {e}")
+        # 2. Pobieramy dokładną sumę bajtów (dla precyzyjnego used_percent)
+        total_res = subprocess.run(['sudo', 'du', '-sb', path], capture_output=True, text=True, timeout=10)
+        total_bytes = int(total_res.stdout.split()[0])
 
-    return storage_details_cache
+        # Zapisujemy do cache
+        storage_cache[path] = {
+            "folders": folders,
+            "used_gb_real": total_bytes / (1024**3),
+            "last_update": now
+        }
+    except Exception as e:
+        # W razie błędu (np. pusty dysk) zwracamy puste dane, żeby nie wywalić API
+        storage_cache[path] = {
+            "folders": {"info": "Brak danych lub dysk pusty"},
+            "used_gb_real": 0,
+            "last_update": now
+        }
+
+    return storage_cache[path]
 
 @sys_ns.route('/stats')
 class SystemStats(Resource):
@@ -116,6 +121,7 @@ class SystemStats(Resource):
         grouped_disks = {}
 
         for part in partitions:
+            # Filtrujemy tylko fizyczne dyski SD
             if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
 
@@ -127,27 +133,23 @@ class SystemStats(Resource):
                 usage = psutil.disk_usage(part.mountpoint)
                 total_gb = round(usage.total / (1024**3), 2)
 
-                # Inicjalizacja podstawowych danych (ten sam JSON)
+                # Pobieramy szczegóły (foldery i realną wagę) dla KAŻDEGO punktu montowania
+                details = get_mount_details(part.mountpoint)
+                used_gb = details["used_gb_real"]
+
+                # Budujemy JSON w Twoim formacie
                 p_data = {
                     "mount": part.mountpoint,
-                    "used_percent": f"{usage.percent}%",
-                    "free_gb": round(usage.free / (1024**3), 2),
-                    "total_gb": total_gb
+                    "used_percent": f"{round((used_gb / total_gb) * 100, 1)}%",
+                    "free_gb": round(total_gb - used_gb, 2),
+                    "total_gb": total_gb,
+                    "folder_usage": details["folders"]  # Teraz w każdym dysku
                 }
 
-                # Specjalna obsługa dla Cold Storage - dodajemy foldery
-                if part.mountpoint == '/mnt/cold_storage':
-                    details = get_detailed_storage_info(part.mountpoint)
-                    used_gb = details["used_gb"]
-
-                    # Nadpisujemy wartości systemowe realnymi danymi z 'du'
-                    p_data["used_percent"] = f"{round((used_gb / total_gb) * 100, 1)}%"
-                    p_data["free_gb"] = round(total_gb - used_gb, 2)
-                    # DODAJEMY NOWY KLUCZ Z FOLDERAMI
-                    p_data["folder_usage"] = details["folders"]
-
                 grouped_disks[dev_base]["partitions"].append(p_data)
-            except: continue
+            except Exception as e:
+                print(f"Błąd partycji {part.mountpoint}: {e}")
+                continue
 
         return {
             "system_info": {
