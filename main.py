@@ -27,8 +27,6 @@ power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzen
 
 # --- FUNKCJE POMOCNICZE ---
 
-# Cache na dane z komendy du
-storage_cache = {}
 
 def get_uptime():
     """Zwraca czytelny czas pracy systemu."""
@@ -66,51 +64,16 @@ def get_disk_temp(device):
 
 # --- ENDPOINTY: SYSTEM ---
 
-CACHE_TIMEOUT = 600  # 10 minut
 
-def get_mount_details(path):
-    """Pobiera wagę folderów i realny rozmiar dla dowolnej ścieżki."""
-    now = time.time()
-
-    # Jeśli mamy świeży cache dla tej ścieżki, zwracamy go
-    if path in storage_cache and (now - storage_cache[path]["last_update"] < CACHE_TIMEOUT):
-        return storage_cache[path]
-
+def get_folder_structure(path):
+    """Szybka lista folderów (tylko pierwszy poziom, bez du)."""
     try:
-        # 1. Pobieramy wagę folderów (max-depth=1)
-        # Używamy sudo, aby mieć dostęp do wszystkich podfolderów
-        result = subprocess.run(
-            f"sudo du -sh {path}/*",
-            shell=True, capture_output=True, text=True, timeout=15
-        )
+        folders = [f for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
+        # Zwracamy tylko nazwy, żeby nie spowalniać API liczeniem bajtów
+        return folders
+    except: return []
 
-        folders = {}
-        for line in result.stdout.splitlines():
-            parts = line.split()
-            if len(parts) >= 2:
-                size_str = parts[0]
-                folder_name = os.path.basename(parts[1])
-                folders[folder_name] = size_str
-
-        # 2. Pobieramy dokładną sumę bajtów (dla precyzyjnego used_percent)
-        total_res = subprocess.run(['sudo', 'du', '-sb', path], capture_output=True, text=True, timeout=10)
-        total_bytes = int(total_res.stdout.split()[0])
-
-        # Zapisujemy do cache
-        storage_cache[path] = {
-            "folders": folders,
-            "used_gb_real": total_bytes / (1024**3),
-            "last_update": now
-        }
-    except Exception as e:
-        # W razie błędu (np. pusty dysk) zwracamy puste dane, żeby nie wywalić API
-        storage_cache[path] = {
-            "folders": {"info": "Brak danych lub dysk pusty"},
-            "used_gb_real": 0,
-            "last_update": now
-        }
-
-    return storage_cache[path]
+# --- ENDPOINTY ---
 
 @sys_ns.route('/stats')
 class SystemStats(Resource):
@@ -121,8 +84,8 @@ class SystemStats(Resource):
         grouped_disks = {}
 
         for part in partitions:
-            # Filtrujemy tylko fizyczne dyski SD
-            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
+            # Filtry: tylko fizyczne dyski, pomijamy systemowe drobiazgi
+            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop', '/boot']) or not part.device.startswith('/dev/sd'):
                 continue
 
             dev_base = re.sub(r'\d+$', '', part.device)
@@ -130,38 +93,40 @@ class SystemStats(Resource):
                 grouped_disks[dev_base] = {"device": dev_base, "temp": get_disk_temp(dev_base), "partitions": []}
 
             try:
-                usage = psutil.disk_usage(part.mountpoint)
-                total_gb = round(usage.total / (1024**3), 2)
+                # Używamy shutil.disk_usage (odpowiednik komendy df)
+                total, used, free = shutil.disk_usage(part.mountpoint)
 
-                # Pobieramy szczegóły (foldery i realną wagę) dla KAŻDEGO punktu montowania
-                details = get_mount_details(part.mountpoint)
-                used_gb = details["used_gb_real"]
+                total_gb = round(total / (1024**3), 2)
+                used_gb = round(used / (1024**3), 2)
+                free_gb = round(free / (1024**3), 2)
 
-                # Budujemy JSON w Twoim formacie
+                # OBLICZENIA "SYSTEMOWYCH RZECZY" (Reserved Space + Metadane)
+                # Różnica między tym co system widzi jako 'zajęte' a faktycznymi plikami
+                # Tutaj pokazujemy to jako różnicę w systemie plików
+                reserved_gb = round(total_gb - used_gb - free_gb, 2)
+
                 p_data = {
                     "mount": part.mountpoint,
-                    "used_percent": f"{round((used_gb / total_gb) * 100, 1)}%",
-                    "free_gb": round(total_gb - used_gb, 2),
+                    "used_percent": f"{round((used / total) * 100, 1)}%",
+                    "used_gb": used_gb,
+                    "free_gb": free_gb,
                     "total_gb": total_gb,
-                    "folder_usage": details["folders"]  # Teraz w każdym dysku
+                    "system_overhead_gb": reserved_gb, # To są te "systemowe rzeczy"
+                    "folders": get_folder_structure(part.mountpoint)
                 }
 
                 grouped_disks[dev_base]["partitions"].append(p_data)
-            except Exception as e:
-                print(f"Błąd partycji {part.mountpoint}: {e}")
-                continue
+            except: continue
 
         return {
             "system_info": {
                 "uptime": get_uptime(),
                 "cpu_temp": get_cpu_temp(),
-                "cpu_load_1min": round(load1, 2),
-                "active_processes": len(psutil.pids())
+                "cpu_load_1min": round(load1, 2)
             },
             "ram": {
                 "total_gb": round(ram.total / (1024**3), 2),
                 "used_gb": round(ram.used / (1024**3), 2),
-                "free_gb": round(ram.available / (1024**3), 2),
                 "percent": f"{ram.percent}%"
             },
             "disks": list(grouped_disks.values())
