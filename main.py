@@ -6,6 +6,7 @@ import subprocess
 import re
 import os
 import time
+import requests
 from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
