@@ -22,7 +22,7 @@ sys_ns = api.namespace('system', description='Statystyki sprzętowe')
 logs_ns = api.namespace('backups', description='Analiza logów backupu')
 actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
 power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzenia')
-
+ml_ns = api.namespace('ml', description='Statusy zewnętrznych usług Machine Learning')
 
 
 # --- FUNKCJE POMOCNICZE ---
@@ -197,6 +197,28 @@ class Reboot(Resource):
             return {'status': 'success', 'message': 'System is rebooting...'}, 200
         except Exception as e:
             return {'status': 'error', 'message': str(e)}, 500
+@sys_ns.route('/ml-status')
+class MLStatus(Resource):
+    @api.doc(description='Sprawdza czy zewnętrzny serwis ML pod adresem 192.168.0.221:3003 odpowiada')
+    def get(self):
+        """Sprawdza dostępność serwera ML (Ping HTTP)"""
+        target_url = "http://192.168.0.221:3003/"
+        try:
+            # Krótki timeout, żeby nie blokować API
+            response = requests.get(target_url, timeout=2)
+            return {
+                "online": True,
+                "status_code": response.status_code,
+                "url": target_url,
+                "timestamp": datetime.now().isoformat()
+            }, 200
+        except requests.exceptions.RequestException as e:
+            return {
+                "online": False,
+                "error": str(type(e).__name__),
+                "message": "Serwer ML nieosiągalny",
+                "url": target_url
+            }, 503
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
