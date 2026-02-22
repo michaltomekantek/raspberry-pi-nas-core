@@ -5,6 +5,7 @@ import psutil
 import subprocess
 import re
 import os
+import time
 from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
@@ -22,7 +23,15 @@ logs_ns = api.namespace('backups', description='Analiza logów backupu')
 actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
 power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzenia')
 
+
+
 # --- FUNKCJE POMOCNICZE ---
+
+# Cache na dane z komendy du
+storage_cache = {
+    "last_update": 0,
+    "used_gb": 0
+}
 
 def get_uptime():
     """Zwraca czytelny czas pracy systemu."""
@@ -60,16 +69,30 @@ def get_disk_temp(device):
 
 # --- ENDPOINTY: SYSTEM ---
 
+def get_actual_used_gb(path):
+    global storage_cache
+    now = time.time()
+    # Odświeżaj dane nie częściej niż co 10 minut (600s)
+    if now - storage_cache["last_update"] > 600:
+        try:
+            # Wywołujemy du -sb (rozmiar w bajtach, podsumowanie)
+            result = subprocess.run(['du', '-sb', path], capture_output=True, text=True, timeout=5)
+            bytes_val = int(result.stdout.split()[0])
+            storage_cache["used_gb"] = bytes_val / (1024**3)
+            storage_cache["last_update"] = now
+        except:
+            pass
+    return storage_cache["used_gb"]
+
 @sys_ns.route('/stats')
 class SystemStats(Resource):
     def get(self):
-        """Pełne statystyki: CPU, RAM, Uptime i Dyski."""
+        """Pełne statystyki: CPU, RAM, Uptime i Dyski (Realne wartości plików)."""
         ram = psutil.virtual_memory()
         load1, load5, load15 = os.getloadavg()
         partitions = psutil.disk_partitions()
         grouped_disks = {}
 
-        # Grupowanie dysków
         for part in partitions:
             if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
@@ -79,11 +102,27 @@ class SystemStats(Resource):
 
             try:
                 usage = psutil.disk_usage(part.mountpoint)
+
+                # --- LOGIKA PODMIANY DANYCH DLA NAS ---
+                total_gb = round(usage.total / (1024**3), 2)
+
+                if part.mountpoint == '/mnt/cold_storage':
+                    # Pobieramy realną wagę plików przez du
+                    used_gb = get_actual_used_gb(part.mountpoint)
+                    free_gb = round(total_gb - used_gb, 2)
+                    used_percent = f"{round((used_gb / total_gb) * 100, 1)}%"
+                else:
+                    # Dla innych dysków zostawiamy standardowe psutil
+                    used_gb = usage.used / (1024**3)
+                    free_gb = round(usage.free / (1024**3), 2)
+                    used_percent = f"{usage.percent}%"
+                # --------------------------------------
+
                 grouped_disks[dev_base]["partitions"].append({
                     "mount": part.mountpoint,
-                    "used_percent": f"{usage.percent}%",
-                    "free_gb": round(usage.free / (1024**3), 2),
-                    "total_gb": round(usage.total / (1024**3), 2)
+                    "used_percent": used_percent,
+                    "free_gb": free_gb,
+                    "total_gb": total_gb
                 })
             except: continue
 
