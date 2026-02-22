@@ -20,6 +20,7 @@ api = Api(app, version='2.2', title='Raspberry Pi NAS Ultimate API',
 sys_ns = api.namespace('system', description='Statystyki sprzętowe')
 logs_ns = api.namespace('backups', description='Analiza logów backupu')
 actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
+power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzenia')
 
 # --- FUNKCJE POMOCNICZE ---
 
@@ -138,29 +139,25 @@ class RunColdStorage(Resource):
         """Uruchamia backup na zimny dysk (cold_storage.sh)"""
         return run_script("cold_storage.sh")
 
-@app.post("/system/shutdown", tags=[SYSTEM_TAG], summary="Wyłącz urządzenie")
-async def post_shutdown():
-    """
-    Ta operacja spowoduje **natychmiastowe wyłączenie** Raspberry Pi.
-    Po wywołaniu serwer przestanie odpowiadać.
-    """
-    try:
-        shutdown_raspberry()
-        return {"status": "success", "message": "Zamykanie systemu..."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@power_ns.route('/shutdown')
+class Shutdown(Resource):
+    @api.doc(description='Natychmiastowe wyłączenie Raspberry Pi')
+    def post(self):
+        try:
+            shutdown_raspberry()
+            return {'status': 'success', 'message': 'System is shutting down...'}, 200
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}, 500
 
-@app.post("/system/reboot", tags=[SYSTEM_TAG], summary="Zrestartuj urządzenie")
-async def post_reboot():
-    """
-    Ta operacja spowoduje **restart** Raspberry Pi.
-    Urządzenie będzie niedostępne przez około 30-60 sekund.
-    """
-    try:
-        reboot_raspberry()
-        return {"status": "success", "message": "Restartowanie systemu..."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@power_ns.route('/reboot')
+class Reboot(Resource):
+    @api.doc(description='Natychmiastowy restart Raspberry Pi')
+    def post(self):
+        try:
+            reboot_raspberry()
+            return {'status': 'success', 'message': 'System is rebooting...'}, 200
+        except Exception as e:
+            return {'status': 'error', 'message': str(e)}, 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
