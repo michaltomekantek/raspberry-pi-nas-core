@@ -10,6 +10,7 @@ from datetime import datetime
 # Importujemy nasz parser z osobnego pliku
 from log_parser import get_backup_files, parse_backup_log
 from script_manager import run_script
+from system_manager import shutdown_raspberry, reboot_raspberry
 
 app = Flask(__name__)
 CORS(app)
@@ -136,6 +137,30 @@ class RunColdStorage(Resource):
     def post(self):
         """Uruchamia backup na zimny dysk (cold_storage.sh)"""
         return run_script("cold_storage.sh")
+
+@app.post("/system/shutdown", tags=[SYSTEM_TAG], summary="Wyłącz urządzenie")
+async def post_shutdown():
+    """
+    Ta operacja spowoduje **natychmiastowe wyłączenie** Raspberry Pi.
+    Po wywołaniu serwer przestanie odpowiadać.
+    """
+    try:
+        shutdown_raspberry()
+        return {"status": "success", "message": "Zamykanie systemu..."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/system/reboot", tags=[SYSTEM_TAG], summary="Zrestartuj urządzenie")
+async def post_reboot():
+    """
+    Ta operacja spowoduje **restart** Raspberry Pi.
+    Urządzenie będzie niedostępne przez około 30-60 sekund.
+    """
+    try:
+        reboot_raspberry()
+        return {"status": "success", "message": "Restartowanie systemu..."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
