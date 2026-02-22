@@ -10,7 +10,7 @@ import requests
 from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
-from log_parser import get_backup_files, parse_backup_log
+from log_parser import get_backup_files, read_backup_log_content
 from script_manager import run_script
 from system_manager import shutdown_raspberry, reboot_raspberry
 
