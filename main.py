@@ -28,9 +28,10 @@ power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzen
 # --- FUNKCJE POMOCNICZE ---
 
 # Cache na dane z komendy du
-storage_cache = {
+storage_details_cache = {
     "last_update": 0,
-    "used_gb": 0
+    "used_gb": 0,
+    "folders": {}
 }
 
 def get_uptime():
@@ -69,61 +70,83 @@ def get_disk_temp(device):
 
 # --- ENDPOINTY: SYSTEM ---
 
-def get_actual_used_gb(path):
-    global storage_cache
+CACHE_TIMEOUT = 600  # 10 minut
+
+def get_detailed_storage_info(path):
+    global storage_details_cache
     now = time.time()
-    # Odświeżaj dane nie częściej niż co 10 minut (600s)
-    if now - storage_cache["last_update"] > 600:
+
+    if now - storage_details_cache["last_update"] > CACHE_TIMEOUT:
         try:
-            # Wywołujemy du -sb (rozmiar w bajtach, podsumowanie)
-            result = subprocess.run(['du', '-sb', path], capture_output=True, text=True, timeout=5)
-            bytes_val = int(result.stdout.split()[0])
-            storage_cache["used_gb"] = bytes_val / (1024**3)
-            storage_cache["last_update"] = now
-        except:
-            pass
-    return storage_cache["used_gb"]
+            # 1. Pobieramy wagę głównych folderów (max-depth=1)
+            # du -sh * zwraca czytelne wartości typu 238G
+            result = subprocess.run(
+                f"sudo du -sh {path}/*",
+                shell=True, capture_output=True, text=True, timeout=10
+            )
+
+            folders = {}
+            total_bytes = 0
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    size_str = parts[0]
+                    folder_path = parts[1]
+                    folder_name = os.path.basename(folder_path)
+                    folders[folder_name] = size_str
+
+            # 2. Pobieramy dokładną sumę bajtów dla całego dysku do procentów
+            total_res = subprocess.run(['du', '-sb', path], capture_output=True, text=True, timeout=5)
+            total_bytes = int(total_res.stdout.split()[0])
+
+            storage_details_cache["folders"] = folders
+            storage_details_cache["used_gb"] = total_bytes / (1024**3)
+            storage_details_cache["last_update"] = now
+        except Exception as e:
+            print(f"Błąd du: {e}")
+
+    return storage_details_cache
 
 @sys_ns.route('/stats')
 class SystemStats(Resource):
     def get(self):
-        """Pełne statystyki: CPU, RAM, Uptime i Dyski (Realne wartości plików)."""
         ram = psutil.virtual_memory()
-        load1, load5, load15 = os.getloadavg()
+        load1, _, _ = os.getloadavg()
         partitions = psutil.disk_partitions()
         grouped_disks = {}
 
         for part in partitions:
             if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
+
             dev_base = re.sub(r'\d+$', '', part.device)
             if dev_base not in grouped_disks:
                 grouped_disks[dev_base] = {"device": dev_base, "temp": get_disk_temp(dev_base), "partitions": []}
 
             try:
                 usage = psutil.disk_usage(part.mountpoint)
-
-                # --- LOGIKA PODMIANY DANYCH DLA NAS ---
                 total_gb = round(usage.total / (1024**3), 2)
 
-                if part.mountpoint == '/mnt/cold_storage':
-                    # Pobieramy realną wagę plików przez du
-                    used_gb = get_actual_used_gb(part.mountpoint)
-                    free_gb = round(total_gb - used_gb, 2)
-                    used_percent = f"{round((used_gb / total_gb) * 100, 1)}%"
-                else:
-                    # Dla innych dysków zostawiamy standardowe psutil
-                    used_gb = usage.used / (1024**3)
-                    free_gb = round(usage.free / (1024**3), 2)
-                    used_percent = f"{usage.percent}%"
-                # --------------------------------------
-
-                grouped_disks[dev_base]["partitions"].append({
+                # Inicjalizacja podstawowych danych (ten sam JSON)
+                p_data = {
                     "mount": part.mountpoint,
-                    "used_percent": used_percent,
-                    "free_gb": free_gb,
+                    "used_percent": f"{usage.percent}%",
+                    "free_gb": round(usage.free / (1024**3), 2),
                     "total_gb": total_gb
-                })
+                }
+
+                # Specjalna obsługa dla Cold Storage - dodajemy foldery
+                if part.mountpoint == '/mnt/cold_storage':
+                    details = get_detailed_storage_info(part.mountpoint)
+                    used_gb = details["used_gb"]
+
+                    # Nadpisujemy wartości systemowe realnymi danymi z 'du'
+                    p_data["used_percent"] = f"{round((used_gb / total_gb) * 100, 1)}%"
+                    p_data["free_gb"] = round(total_gb - used_gb, 2)
+                    # DODAJEMY NOWY KLUCZ Z FOLDERAMI
+                    p_data["folder_usage"] = details["folders"]
+
+                grouped_disks[dev_base]["partitions"].append(p_data)
             except: continue
 
         return {
@@ -141,7 +164,6 @@ class SystemStats(Resource):
             },
             "disks": list(grouped_disks.values())
         }
-
 # --- ENDPOINTY: BACKUPS ---
 
 @logs_ns.route('/')
