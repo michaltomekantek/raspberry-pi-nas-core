@@ -5,7 +5,6 @@ import psutil
 import subprocess
 import re
 import os
-import time
 from datetime import datetime
 
 # Importujemy nasz parser z osobnego pliku
@@ -23,10 +22,7 @@ logs_ns = api.namespace('backups', description='Analiza logów backupu')
 actions_ns = api.namespace('actions', description='Ręczne wywoływanie zadań')
 power_ns = api.namespace('power', description='Zarządzanie zasilaniem urządzenia')
 
-
-
 # --- FUNKCJE POMOCNICZE ---
-
 
 def get_uptime():
     """Zwraca czytelny czas pracy systemu."""
@@ -64,73 +60,49 @@ def get_disk_temp(device):
 
 # --- ENDPOINTY: SYSTEM ---
 
-
-def get_folder_structure(path):
-    """Szybka lista folderów (tylko pierwszy poziom, bez du)."""
-    try:
-        folders = [f for f in os.listdir(path) if os.path.isdir(os.path.join(path, f))]
-        # Zwracamy tylko nazwy, żeby nie spowalniać API liczeniem bajtów
-        return folders
-    except: return []
-
-# --- ENDPOINTY ---
-
 @sys_ns.route('/stats')
 class SystemStats(Resource):
     def get(self):
+        """Pełne statystyki: CPU, RAM, Uptime i Dyski."""
         ram = psutil.virtual_memory()
-        load1, _, _ = os.getloadavg()
+        load1, load5, load15 = os.getloadavg()
         partitions = psutil.disk_partitions()
         grouped_disks = {}
 
+        # Grupowanie dysków
         for part in partitions:
-            # Filtry: tylko fizyczne dyski, pomijamy systemowe drobiazgi
-            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop', '/boot']) or not part.device.startswith('/dev/sd'):
+            if any(x in part.mountpoint for x in ['/snap', '/docker', '/loop']) or not part.device.startswith('/dev/sd'):
                 continue
-
             dev_base = re.sub(r'\d+$', '', part.device)
             if dev_base not in grouped_disks:
                 grouped_disks[dev_base] = {"device": dev_base, "temp": get_disk_temp(dev_base), "partitions": []}
 
             try:
-                # Używamy shutil.disk_usage (odpowiednik komendy df)
-                total, used, free = shutil.disk_usage(part.mountpoint)
-
-                total_gb = round(total / (1024**3), 2)
-                used_gb = round(used / (1024**3), 2)
-                free_gb = round(free / (1024**3), 2)
-
-                # OBLICZENIA "SYSTEMOWYCH RZECZY" (Reserved Space + Metadane)
-                # Różnica między tym co system widzi jako 'zajęte' a faktycznymi plikami
-                # Tutaj pokazujemy to jako różnicę w systemie plików
-                reserved_gb = round(total_gb - used_gb - free_gb, 2)
-
-                p_data = {
+                usage = psutil.disk_usage(part.mountpoint)
+                grouped_disks[dev_base]["partitions"].append({
                     "mount": part.mountpoint,
-                    "used_percent": f"{round((used / total) * 100, 1)}%",
-                    "used_gb": used_gb,
-                    "free_gb": free_gb,
-                    "total_gb": total_gb,
-                    "system_overhead_gb": reserved_gb, # To są te "systemowe rzeczy"
-                    "folders": get_folder_structure(part.mountpoint)
-                }
-
-                grouped_disks[dev_base]["partitions"].append(p_data)
+                    "used_percent": f"{usage.percent}%",
+                    "free_gb": round(usage.free / (1024**3), 2),
+                    "total_gb": round(usage.total / (1024**3), 2)
+                })
             except: continue
 
         return {
             "system_info": {
                 "uptime": get_uptime(),
                 "cpu_temp": get_cpu_temp(),
-                "cpu_load_1min": round(load1, 2)
+                "cpu_load_1min": round(load1, 2),
+                "active_processes": len(psutil.pids())
             },
             "ram": {
                 "total_gb": round(ram.total / (1024**3), 2),
                 "used_gb": round(ram.used / (1024**3), 2),
+                "free_gb": round(ram.available / (1024**3), 2),
                 "percent": f"{ram.percent}%"
             },
             "disks": list(grouped_disks.values())
         }
+
 # --- ENDPOINTY: BACKUPS ---
 
 @logs_ns.route('/')
