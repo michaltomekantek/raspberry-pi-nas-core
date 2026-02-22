@@ -145,26 +145,38 @@ class SystemStats(Resource):
 
 # --- ENDPOINTY: BACKUPS ---
 
+# --- ENDPOINTY: BACKUPS ---
+
 @logs_ns.route('/')
 class BackupList(Resource):
     def get(self):
+        """Zwraca listę dostępnych plików logów (.log)."""
         files = get_backup_files()
         result = []
         for f in files:
-            data = parse_backup_log(f)
-            if data and "error" in data:
-                result.append({"filename": f, "status": "Error/NoAccess", "date": "N/A", "error_detail": data["error"]})
-            else:
-                result.append({"filename": f, "status": data.get("status", "Unknown"), "date": data.get("timestamp", "N/A")})
+            # Uproszczony status - po prostu informacja o istnieniu logu
+            result.append({
+                "filename": f,
+                "type": "text/log"
+            })
         return result
 
 @logs_ns.route('/<string:filename>')
 class BackupDetail(Resource):
+    @api.doc(description='Pobiera pełną treść wybranego pliku logu')
     def get(self, filename):
-        if not filename.endswith('.json'): filename += '.json'
-        data = parse_backup_log(filename)
-        if not data or "error" in data:
-            return {"error": data.get("error", "Plik nie istnieje") if data else "Plik nie istnieje"}, 404
+        """Zwraca surową treść logu dla frontendu."""
+        # Jeśli frontend nie podał rozszerzenia, dodajemy .log
+        if not filename.endswith('.log'):
+            # Sprawdzamy czy to nie próba wywołania starego .json
+            if filename.endswith('.json'):
+                filename = filename.replace('.json', '.log')
+            else:
+                filename += '.log'
+
+        data = read_backup_log_content(filename)
+        if "error" in data:
+            return data, 404
         return data
 
 @actions_ns.route('/run-daily-backup')
