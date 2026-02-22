@@ -191,6 +191,20 @@ class RunColdStorage(Resource):
         """Uruchamia backup na zimny dysk (cold_storage.sh)"""
         return run_script("cold_storage.sh")
 
+@actions_ns.route('/update-ui')
+class UpdateUI(Resource):
+    @api.doc(description='Aktualizuje kod frontendu (git pull) i buduje produkcyjną wersję (npm run build)')
+    def post(self):
+        """Pobiera zmiany i buduje projekt UI"""
+        return run_script("update_ui_nas_app.sh")
+
+@actions_ns.route('/update-core')
+class UpdateUI(Resource):
+    @api.doc(description='Aktualizuje kod frontendu (git pull) i buduje produkcyjną wersję (npm run build)')
+    def post(self):
+        """Pobiera zmiany i buduje projekt UI"""
+        return run_script("update_core_nas_app.sh")
+
 @power_ns.route('/shutdown')
 class Shutdown(Resource):
     @api.doc(description='Natychmiastowe wyłączenie Raspberry Pi')
